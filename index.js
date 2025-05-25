@@ -106,7 +106,7 @@ app.post('/webhook', async (req, res) => {
 async function getQwenTextResponse(userId, message) {
   try {
     const completion = await openai.chat.completions.create({
-      model: "qwen/qwen3-235b-a22b:free", // Your desired model
+      model: "qwen/qwen3-235b-a22b:free",
       messages: [
         { role: 'system', content: 'You are a helpful assistant.' },
         { role: 'user', content: message },
@@ -124,7 +124,7 @@ async function getQwenTextResponse(userId, message) {
 async function getQwenImageResponse(userId, imageUrl, prompt = "What is shown in this image?") {
   try {
     const completion = await openai.chat.completions.create({
-      model: "qwen/qwen3-235b-a22b:free", // Your desired model
+      model: "qwen/qwen3-235b-a22b:free",
       messages: [
         {
           role: 'user',
