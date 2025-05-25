@@ -33,11 +33,11 @@ const User = mongoose.model('User', userSchema);
 
 // Initialize OpenAI-compatible client for OpenRouter
 const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1 ",
+  baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY,
   defaultHeaders: {
-    "HTTP-Referer": "https://your-site.com ", // Replace with your domain
-    "X-Title": "HmDev Facebook Bot", // Optional
+    "HTTP-Referer": process.env.SITE_URL || "https://hm-validator.vercel.app",
+    "X-Title": "HM dev bot",
   },
 });
 
@@ -56,72 +56,92 @@ app.get('/webhook', (req, res) => {
 
 // Handle incoming messages
 app.post('/webhook', async (req, res) => {
-  const body = req.body;
+  try {
+    const body = req.body;
 
-  if (body.object === 'page') {
-    for (const entry of body.entry) {
-      for (const msg of entry.messaging) {
-        if (msg.message) {
-          const senderId = msg.sender.id;
-
-          let user = await User.findOne({ userId: senderId });
-
-          if (!user) {
-            user = new User({ userId: senderId });
-            await user.save();
-
-            // First-time greeting
-            await sendMessage(senderId, "👋 Hello! I'm a bot developed by HmDev. I'm here to help you!", {
-              typing: true,
-              quickReplies: getQuickReplies()
-            });
-          } else {
-            let userMessage = msg.message.text?.trim().toLowerCase() || '';
-
-            if (userMessage.includes('how are you') || userMessage.includes("how are u")) {
-              await sendMessage(senderId, "🤖 I'm Hm Dev Bot!", {
+    if (body.object === 'page') {
+      for (const entry of body.entry) {
+        for (const msg of entry.messaging) {
+          if (msg.message && msg.sender.id) {
+            const senderId = msg.sender.id;
+            
+            // Validate/register user
+            let user = await User.findOne({ userId: senderId });
+            if (!user) {
+              user = new User({ userId: senderId });
+              await user.save();
+              
+              // First-time greeting
+              await sendMessage(senderId, "👋 Hello! I'm a bot developed by HmDev. How can I help you?", {
                 typing: true,
-                buttons: getButtons()
+                quickReplies: getQuickReplies()
               });
-            } else if (msg.message.attachments && msg.message.attachments[0].type === 'image') {
+              continue;
+            }
+
+            // Process message
+            if (msg.message.text) {
+              const userMessage = msg.message.text.trim().toLowerCase();
+              
+              if (userMessage.includes('how are you') || userMessage.includes("how are u")) {
+                await sendMessage(senderId, "🤖 I'm doing great! How can I assist you today?", {
+                  typing: true,
+                  buttons: getButtons()
+                });
+              } else {
+                const aiResponse = await getQwenTextResponse(senderId, userMessage);
+                await sendMessage(senderId, aiResponse, { typing: true });
+              }
+            } else if (msg.message.attachments?.[0]?.type === 'image') {
               const imageUrl = msg.message.attachments[0].payload.url;
               const aiResponse = await getQwenImageResponse(senderId, imageUrl);
-              await sendMessage(senderId, aiResponse, { typing: true });
-            } else if (userMessage) {
-              const aiResponse = await getQwenTextResponse(senderId, userMessage);
               await sendMessage(senderId, aiResponse, { typing: true });
             }
           }
         }
       }
+      res.status(200).send('EVENT_RECEIVED');
+    } else {
+      res.sendStatus(404);
     }
-
-    res.status(200).send('EVENT_RECEIVED');
-  } else {
-    res.sendStatus(404);
+  } catch (error) {
+    console.error('Webhook processing error:', error);
+    res.status(500).send('Internal Server Error');
   }
 });
 
-// Get AI response from Qwen3
+// Get AI text response
 async function getQwenTextResponse(userId, message) {
   try {
     const completion = await openai.chat.completions.create({
       model: "qwen/qwen3-235b-a22b:free",
       messages: [
-        { role: 'system', content: 'You are a helpful assistant.' },
+        { 
+          role: 'system', 
+          content: 'You are a helpful assistant. Keep responses concise and friendly.' 
+        },
         { role: 'user', content: message },
       ],
+      temperature: 0.7,
     });
+
+    if (!completion.choices?.[0]?.message?.content) {
+      throw new Error("Empty response from AI");
+    }
 
     return completion.choices[0].message.content;
   } catch (error) {
-    console.error(`Error getting text response for ${userId}:`, error.response?.data || error.message);
-    return 'I am unable to respond at the moment.';
+    console.error('AI Response Error:', {
+      userId,
+      error: error.message,
+      responseData: error.response?.data,
+    });
+    return "I'm having trouble connecting to my AI brain. Please try again in a moment!";
   }
 }
 
-// Get AI image analysis from Qwen3
-async function getQwenImageResponse(userId, imageUrl, prompt = "What is shown in this image?") {
+// Get AI image analysis
+async function getQwenImageResponse(userId, imageUrl) {
   try {
     const completion = await openai.chat.completions.create({
       model: "qwen/qwen3-235b-a22b:free",
@@ -129,42 +149,43 @@ async function getQwenImageResponse(userId, imageUrl, prompt = "What is shown in
         {
           role: 'user',
           content: [
-            { type: 'text', text: prompt },
+            { type: 'text', text: "Describe this image in detail" },
             { type: 'image_url', image_url: { url: imageUrl } },
           ],
         },
       ],
     });
 
-    return completion.choices[0].message.content;
+    return completion.choices[0].message.content || "I can see the image but can't describe it right now.";
   } catch (error) {
-    console.error(`Error getting image response for ${userId}:`, error.response?.data || error.message);
-    return 'I could not analyze the image at this time.';
+    console.error('AI Image Analysis Error:', error.message);
+    return "I couldn't analyze that image. Please try another one!";
   }
 }
 
-// Simulate typing
+// Send typing indicator
 async function sendTypingIndicator(recipientId) {
-  const payload = {
-    recipient: { id: recipientId },
-    sender_action: "typing_on"
-  };
-
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
-      payload
+      {
+        recipient: { id: recipientId },
+        sender_action: "typing_on"
+      }
     );
 
-    await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 1000) + 1000));
+    // Random typing delay (1-2 seconds)
+    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
 
-    payload.sender_action = "typing_off";
     await axios.post(
       `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
-      payload
+      {
+        recipient: { id: recipientId },
+        sender_action: "typing_off"
+      }
     );
   } catch (error) {
-    console.error('Error sending typing indicator:', error.response?.data || error.message);
+    console.error('Typing Indicator Error:', error.response?.data || error.message);
   }
 }
 
@@ -192,24 +213,31 @@ async function sendMessage(recipientId, text, options = {}) {
             type: "template",
             payload: {
               template_type: "button",
-              text,
-              buttons
+              text: text,
+              buttons: buttons
             }
           }
         }
       };
     }
 
-    await axios.post(
+    const response = await axios.post(
       `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
       messageData
     );
+
+    console.log('Message sent successfully:', response.data);
+
   } catch (error) {
-    console.error('Error sending message:', error.response?.data || error.message);
+    console.error('Message Sending Error:', {
+      error: error.message,
+      response: error.response?.data,
+      recipientId
+    });
   }
 }
 
-// Quick Replies Template
+// Quick Replies
 function getQuickReplies() {
   return [
     {
@@ -230,12 +258,12 @@ function getQuickReplies() {
   ];
 }
 
-// Buttons Template
+// Buttons
 function getButtons() {
   return [
     {
       type: "web_url",
-      url: "https://yourwebsite.com ",
+      url: process.env.SITE_URL || "https://hm-validator.vercel.app",
       title: "Visit My Site"
     },
     {
