@@ -152,7 +152,7 @@ async function sendTypingIndicator(recipientId) {
 
   try {
     await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages?access_token= ${process.env.PAGE_ACCESS_TOKEN}`,
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
       payload
     );
 
@@ -160,7 +160,7 @@ async function sendTypingIndicator(recipientId) {
 
     payload.sender_action = "typing_off";
     await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages?access_token= ${process.env.PAGE_ACCESS_TOKEN}`,
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
       payload
     );
   } catch (error) {
@@ -201,7 +201,7 @@ async function sendMessage(recipientId, text, options = {}) {
     }
 
     await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages?access_token= ${process.env.PAGE_ACCESS_TOKEN}`,
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
       messageData
     );
   } catch (error) {
