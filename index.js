@@ -116,7 +116,7 @@ async function handleTextMessage(senderId, text, user) {
   
   // Don't process confirmation responses
   if (isConfirmationResponse(cleanText, isArabic)) {
-    return;
+    return handleConfirmation(senderId, cleanText, isArabic);
   }
 
   await sendTypingOn(senderId);
@@ -129,13 +129,33 @@ async function handleTextMessage(senderId, text, user) {
   const aiResponse = await getAIResponse(senderId, cleanText, isArabic);
   
   // Only send follow-up if we got a valid response
-  if (!aiResponse.includes("I'm having trouble") && 
-      !aiResponse.includes("حاول مرة أخرى")) {
+  if (isValidResponse(aiResponse)) {
     await updateUserHistory(senderId, cleanText, aiResponse);
     await sendMessageWithTyping(senderId, aiResponse, { isArabic });
     await sendFollowUp(senderId, isArabic);
   } else {
     // If AI failed, just send the error message without follow-up
+    await sendMessageWithTyping(senderId, aiResponse, { isArabic });
+  }
+}
+
+async function handleImageMessage(senderId, imageUrl, user) {
+  const isArabic = user.preferredLanguage === 'ar';
+  
+  await sendTypingOn(senderId);
+  await sendMessageWithTyping(
+    senderId, 
+    isArabic ? "جاري تحليل الصورة..." : "Analyzing your image...", 
+    { delay: 2000, isArabic }
+  );
+  
+  const aiResponse = await getImageAnalysis(senderId, imageUrl, isArabic);
+  
+  if (isValidResponse(aiResponse)) {
+    await updateUserHistory(senderId, "[image]", aiResponse);
+    await sendMessageWithTyping(senderId, aiResponse, { isArabic });
+    await sendFollowUp(senderId, isArabic);
+  } else {
     await sendMessageWithTyping(senderId, aiResponse, { isArabic });
   }
 }
@@ -158,7 +178,7 @@ async function handleQuickReply(senderId, payload, user) {
       if (user.lastResponse) {
         await sendMessageWithTyping(
           senderId,
-          isArabic ? "سأشرح أكثر:" : "Let me elaborate:",
+          isArabic ? "المزيد من التفاصيل:" : "More details:",
           { isArabic }
         );
         await sendMessageWithTyping(senderId, user.lastResponse, { isArabic });
@@ -167,15 +187,23 @@ async function handleQuickReply(senderId, payload, user) {
   }
 }
 
+async function handleConfirmation(senderId, text, isArabic) {
+  await sendMessageWithTyping(
+    senderId,
+    isArabic ? "شكراً لك!" : "Thank you!",
+    { isArabic }
+  );
+}
+
 // ======================
-// IMPROVED AI FUNCTIONS
+// AI FUNCTIONS
 // ======================
 
 async function getAIResponse(userId, message, isArabic = false) {
   try {
     const systemPrompt = isArabic
-      ? "أنت مساعد ذكي يتحدث العربية. أجب بطريقة مفيدة واحترافية."
-      : "You are a helpful assistant. Respond concisely and professionally.";
+      ? "أنت مساعد ذكي يتحدث العربية. أجب بطريقة واضحة ومفيدة في جملتين كحد أقصى."
+      : "You are a helpful assistant. Respond clearly and concisely in 1-2 sentences maximum.";
 
     const completion = await openai.chat.completions.create({
       model: "qwen/qwen3-235b-a22b:free",
@@ -184,14 +212,13 @@ async function getAIResponse(userId, message, isArabic = false) {
         { role: 'user', content: message },
       ],
       temperature: 0.7,
-      max_tokens: 200
+      max_tokens: 150
     });
 
     const response = completion.choices[0]?.message?.content;
     
-    // Validate response quality
-    if (!response || response.length < 5) {
-      throw new Error("Empty or invalid response from AI");
+    if (!response || response.length < 3) {
+      throw new Error("Empty response from AI");
     }
     
     return response;
@@ -199,8 +226,37 @@ async function getAIResponse(userId, message, isArabic = false) {
   } catch (error) {
     console.error('AI error:', error.message);
     return isArabic 
-      ? "عذراً، حدث خطأ ما. يرجى المحاولة مرة أخرى." 
-      : "Sorry, I encountered an error. Please try again.";
+      ? "عذراً، لا يمكنني الإجابة الآن. يرجى المحاولة لاحقاً." 
+      : "Sorry, I can't respond right now. Please try again later.";
+  }
+}
+
+async function getImageAnalysis(userId, imageUrl, isArabic = false) {
+  try {
+    const prompt = isArabic 
+      ? "صف هذه الصورة بدقة في جملتين"
+      : "Describe this image accurately in 2 sentences";
+
+    const completion = await openai.chat.completions.create({
+      model: "qwen/qwen3-235b-a22b:free",
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: imageUrl } },
+          ],
+        },
+      ],
+    });
+
+    const response = completion.choices[0]?.message?.content;
+    return response || (isArabic ? "لا يمكنني رؤية الصورة بوضوح" : "I can't see the image clearly");
+  } catch (error) {
+    console.error('Image analysis error:', error.message);
+    return isArabic 
+      ? "حدث خطأ أثناء تحليل الصورة" 
+      : "Error analyzing image";
   }
 }
 
@@ -214,9 +270,19 @@ function containsArabic(text) {
 
 function isConfirmationResponse(text, isArabic) {
   const confirmations = isArabic
-    ? ["نعم", "نعم، شكرًا", "yes", "yes, thanks"]
-    : ["yes", "yes, thanks", "نعم", "نعم، شكرًا"];
+    ? ["نعم", "نعم، شكرًا", "yes", "yes, thanks", "yes thanks"]
+    : ["yes", "yes, thanks", "yes thanks", "نعم", "نعم، شكرًا"];
   return confirmations.includes(text.toLowerCase());
+}
+
+function isValidResponse(response) {
+  const invalidPatterns = [
+    "I'm having trouble",
+    "I can't respond",
+    "لا يمكنني الإجابة",
+    "حدث خطأ"
+  ];
+  return !invalidPatterns.some(pattern => response.includes(pattern));
 }
 
 async function sendWelcomeSequence(senderId, isArabic = false) {
@@ -235,7 +301,7 @@ async function sendFollowUp(senderId, isArabic = false) {
   await sleep(1000);
   await sendMessageWithTyping(
     senderId,
-    isArabic ? "هل هذا ما كنت تبحث عنه؟" : "Did this answer your question?",
+    isArabic ? "هل وجدت ما تبحث عنه؟" : "Did you find what you needed?",
     {
       quickReplies: getConfirmationReplies(isArabic),
       isArabic
@@ -243,6 +309,71 @@ async function sendFollowUp(senderId, isArabic = false) {
   );
 }
 
-// ... (keep all other utility functions from previous code) ...
+async function updateUserHistory(userId, message, response) {
+  await User.updateOne(
+    { userId },
+    { 
+      lastMessage: message, 
+      lastResponse: response, 
+      updatedAt: new Date() 
+    }
+  );
+}
+
+async function sendTypingOn(recipientId) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
+      { recipient: { id: recipientId }, sender_action: "typing_on" }
+    );
+  } catch (error) {
+    console.error('Typing error:', error.response?.data || error.message);
+  }
+}
+
+async function sendMessageWithTyping(recipientId, text, options = {}) {
+  const { delay = 1000, isArabic = false, quickReplies } = options;
+  
+  try {
+    await sendTypingOn(recipientId);
+    await sleep(isArabic ? delay + 500 : delay);
+
+    const messageData = {
+      recipient: { id: recipientId },
+      message: { text, ...(quickReplies && { quick_replies: quickReplies }) }
+    };
+
+    await axios.post(
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
+      messageData
+    );
+  } catch (error) {
+    console.error('Message failed:', error.response?.data || error.message);
+  }
+}
+
+function getQuickReplies(isArabic = false) {
+  return isArabic
+    ? [
+        { content_type: "text", title: "طرح سؤال", payload: "ask_question_ar" },
+        { content_type: "text", title: "مساعدة", payload: "get_help_ar" }
+      ]
+    : [
+        { content_type: "text", title: "Ask question", payload: "ask_question" },
+        { content_type: "text", title: "Get help", payload: "get_help" }
+      ];
+}
+
+function getConfirmationReplies(isArabic = false) {
+  return isArabic
+    ? [
+        { content_type: "text", title: "نعم، شكرًا", payload: "confirm_yes_ar" },
+        { content_type: "text", title: "مزيد من التفاصيل", payload: "request_more_ar" }
+      ]
+    : [
+        { content_type: "text", title: "Yes, thanks", payload: "confirm_yes" },
+        { content_type: "text", title: "More details", payload: "request_more" }
+      ];
+}
 
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
