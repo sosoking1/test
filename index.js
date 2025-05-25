@@ -1,16 +1,21 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios');
-const mongoose = require('mongoose');
-const OpenAI = require('openai');
-require('dotenv').config();
+// Load environment variables
+import 'dotenv/config';
+
+// Dependencies
+import express from 'express';
+import bodyParser from 'body-parser';
+import axios from 'axios';
+import mongoose from 'mongoose';
+import OpenAI from 'openai';
+
+// Setup Express app
 const app = express();
 app.use(bodyParser.json());
 
-// Load environment variables
+// Port
 const PORT = process.env.PORT || 3000;
 
-// Connect to MongoDB
+// MongoDB connection
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -30,6 +35,10 @@ const User = mongoose.model('User', userSchema);
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1 ",
   apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": "https://your-site.com ", // Replace with your domain
+    "X-Title": "HmDev Facebook Bot", // Optional
+  },
 });
 
 // Webhook verification
@@ -61,7 +70,7 @@ app.post('/webhook', async (req, res) => {
             user = new User({ userId: senderId });
             await user.save();
 
-            // Send greeting
+            // First-time greeting
             await sendMessage(senderId, "👋 Hello! I'm a bot developed by HmDev. I'm here to help you!", {
               typing: true,
               quickReplies: getQuickReplies()
@@ -93,12 +102,11 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Get AI response from Qwen3 or fallback
+// Get AI response from Qwen3
 async function getQwenTextResponse(userId, message) {
   try {
     const completion = await openai.chat.completions.create({
-      model: "qwen/qwen3-235b-a22b:free", // Use this once approved
-      // model: "mistralai/mistral-7b-instruct:free", // Fallback model
+      model: "qwen/qwen3-235b-a22b:free", // Your desired model
       messages: [
         { role: 'system', content: 'You are a helpful assistant.' },
         { role: 'user', content: message },
@@ -112,12 +120,11 @@ async function getQwenTextResponse(userId, message) {
   }
 }
 
-// Image analysis using Qwen3 (when available)
+// Get AI image analysis from Qwen3
 async function getQwenImageResponse(userId, imageUrl, prompt = "What is shown in this image?") {
   try {
     const completion = await openai.chat.completions.create({
-      model: "qwen/qwen3-235b-a22b:free", // Only works after approval
-      // model: "mistralai/mistral-7b-instruct:free", // Not vision-capable
+      model: "qwen/qwen3-235b-a22b:free", // Your desired model
       messages: [
         {
           role: 'user',
@@ -138,30 +145,26 @@ async function getQwenImageResponse(userId, imageUrl, prompt = "What is shown in
 
 // Simulate typing
 async function sendTypingIndicator(recipientId) {
-  const typingOn = {
+  const payload = {
     recipient: { id: recipientId },
     sender_action: "typing_on"
-  };
-
-  const typingOff = {
-    recipient: { id: recipientId },
-    sender_action: "typing_off"
   };
 
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/me/messages?access_token= ${process.env.PAGE_ACCESS_TOKEN}`,
-      typingOn
+      payload
     );
 
     await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 1000) + 1000));
 
+    payload.sender_action = "typing_off";
     await axios.post(
       `https://graph.facebook.com/v20.0/me/messages?access_token= ${process.env.PAGE_ACCESS_TOKEN}`,
-      typingOff
+      payload
     );
   } catch (error) {
-    console.error('Error sending typing indicator:', error.message);
+    console.error('Error sending typing indicator:', error.response?.data || error.message);
   }
 }
 
@@ -202,7 +205,7 @@ async function sendMessage(recipientId, text, options = {}) {
       messageData
     );
   } catch (error) {
-    console.error('Error sending message:', error.message);
+    console.error('Error sending message:', error.response?.data || error.message);
   }
 }
 
