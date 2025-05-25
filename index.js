@@ -1,147 +1,210 @@
-// Load environment variables
+// bot.js
 import 'dotenv/config';
-
-// Dependencies
 import express from 'express';
-import bodyParser from 'body-parser';
 import axios from 'axios';
 import mongoose from 'mongoose';
 import OpenAI from 'openai';
+import User from './models/User.js'; // Your User model
+import util from 'util';
 
-// Setup Express app
 const app = express();
-app.use(bodyParser.json());
-
-// Port
+app.use(express.json());
 const PORT = process.env.PORT || 3000;
+const sleep = util.promisify(setTimeout);
+const activeUsers = new Map();
 
-// MongoDB connection
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-const db = mongoose.connection;
-db.on('error', console.error.bind(console, 'MongoDB connection error:'));
-db.once('open', () => console.log('✅ Connected to MongoDB'));
+// Database connection
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
-// Define User Schema
-const userSchema = new mongoose.Schema({
-  userId: String,
-  firstSeen: { type: Date, default: Date.now },
-});
-const User = mongoose.model('User', userSchema);
-
-// Initialize OpenAI-compatible client for OpenRouter
+// OpenRouter AI setup
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY,
   defaultHeaders: {
-    "HTTP-Referer": process.env.SITE_URL || "https://hm-validator.vercel.app",
-    "X-Title": "HM dev bot",
+    "HTTP-Referer": process.env.SITE_URL || "https://your-site.com",
+    "X-Title": "AI Assistant Bot",
   },
 });
 
 // Webhook verification
 app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode && token === process.env.VERIFY_TOKEN) {
-    res.status(200).send(challenge);
+  if (req.query['hub.mode'] === 'subscribe' && 
+      req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+    res.status(200).send(req.query['hub.challenge']);
   } else {
-    res.status(403).send('Verification failed.');
+    res.status(403).send('Verification failed');
   }
 });
 
-// Handle incoming messages
+// Message processing
 app.post('/webhook', async (req, res) => {
+  if (req.body.object !== 'page') return res.sendStatus(404);
+
   try {
-    const body = req.body;
-
-    if (body.object === 'page') {
-      for (const entry of body.entry) {
-        for (const msg of entry.messaging) {
-          if (msg.message && msg.sender.id) {
-            const senderId = msg.sender.id;
-            
-            // Validate/register user
-            let user = await User.findOne({ userId: senderId });
-            if (!user) {
-              user = new User({ userId: senderId });
-              await user.save();
-              
-              // First-time greeting
-              await sendMessage(senderId, "👋 Hello! I'm a bot developed by HmDev. How can I help you?", {
-                typing: true,
-                quickReplies: getQuickReplies()
-              });
-              continue;
-            }
-
-            // Process message
-            if (msg.message.text) {
-              const userMessage = msg.message.text.trim().toLowerCase();
-              
-              if (userMessage.includes('how are you') || userMessage.includes("how are u")) {
-                await sendMessage(senderId, "🤖 I'm doing great! How can I assist you today?", {
-                  typing: true,
-                  buttons: getButtons()
-                });
-              } else {
-                const aiResponse = await getQwenTextResponse(senderId, userMessage);
-                await sendMessage(senderId, aiResponse, { typing: true });
-              }
-            } else if (msg.message.attachments?.[0]?.type === 'image') {
-              const imageUrl = msg.message.attachments[0].payload.url;
-              const aiResponse = await getQwenImageResponse(senderId, imageUrl);
-              await sendMessage(senderId, aiResponse, { typing: true });
-            }
-          }
-        }
-      }
-      res.status(200).send('EVENT_RECEIVED');
-    } else {
-      res.sendStatus(404);
-    }
+    await Promise.all(req.body.entry.map(processEntry));
+    res.status(200).send('EVENT_RECEIVED');
   } catch (error) {
-    console.error('Webhook processing error:', error);
-    res.status(500).send('Internal Server Error');
+    console.error('Webhook error:', error);
+    res.status(500).send('Server error');
   }
 });
 
-// Get AI text response
-async function getQwenTextResponse(userId, message) {
+async function processEntry(entry) {
+  for (const msg of entry.messaging) {
+    if (!msg.message || !msg.sender?.id) continue;
+    
+    const senderId = msg.sender.id;
+    if (activeUsers.has(senderId)) continue;
+    
+    activeUsers.set(senderId, true);
+    try {
+      await processMessage(senderId, msg.message);
+    } finally {
+      activeUsers.delete(senderId);
+    }
+  }
+}
+
+async function processMessage(senderId, message) {
+  const user = await User.findOneAndUpdate(
+    { userId: senderId },
+    { $inc: { messageCount: 1 } },
+    { upsert: true, new: true }
+  );
+
+  if (message.quick_reply?.payload) {
+    return handleQuickReply(senderId, message.quick_reply.payload, user);
+  }
+
+  if (message.text) {
+    await handleTextMessage(senderId, message.text, user);
+  } else if (message.attachments?.[0]?.type === 'image') {
+    await handleImageMessage(senderId, message.attachments[0].payload.url, user);
+  }
+}
+
+async function handleTextMessage(senderId, text, user) {
+  const cleanText = text.trim().toLowerCase();
+  
+  await sendTypingOn(senderId);
+  await sleep(1500);
+
+  if (user.messageCount === 1) {
+    return sendWelcomeSequence(senderId);
+  }
+
+  if (isSimilarToLastMessage(user, cleanText)) {
+    return sendAlternativeResponse(senderId, user);
+  }
+
+  const aiResponse = await getAIResponse(senderId, cleanText);
+  await updateUserHistory(senderId, cleanText, aiResponse);
+  await sendMessageWithTyping(senderId, aiResponse);
+  await sendFollowUp(senderId);
+}
+
+async function handleImageMessage(senderId, imageUrl, user) {
+  await sendTypingOn(senderId);
+  await sendMessageWithTyping(senderId, "Analyzing your image...", { delay: 2000 });
+  
+  const aiResponse = await getImageAnalysis(senderId, imageUrl);
+  await updateUserHistory(senderId, "[image]", aiResponse);
+  await sendMessageWithTyping(senderId, aiResponse);
+  await sendFollowUp(senderId);
+}
+
+// ===== Helper Functions =====
+async function sendWelcomeSequence(senderId) {
+  await sendMessageWithTyping(senderId, "👋 Hello! I'm your AI assistant.", { delay: 2000 });
+  await sleep(1000);
+  await sendMessageWithTyping(
+    senderId, 
+    "How can I help you today?", 
+    { quickReplies: getQuickReplies() }
+  );
+}
+
+async function sendAlternativeResponse(senderId, user) {
+  const newResponse = await getAIResponse(
+    senderId, 
+    `Re-explain differently: ${user.lastMessage}`
+  );
+  
+  await updateUserHistory(senderId, user.lastMessage, newResponse);
+  await sendMessageWithTyping(senderId, newResponse);
+  await sendMessageWithTyping(
+    senderId,
+    "I explained this differently. Does it help?",
+    { quickReplies: getConfirmationReplies() }
+  );
+}
+
+async function updateUserHistory(userId, message, response) {
+  await User.updateOne(
+    { userId },
+    { lastMessage: message, lastResponse: response, updatedAt: new Date() }
+  );
+}
+
+// ===== Messaging Functions =====
+async function sendTypingOn(recipientId) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
+      { recipient: { id: recipientId }, sender_action: "typing_on" }
+    );
+  } catch (error) {
+    console.error('Typing error:', error.response?.data || error.message);
+  }
+}
+
+async function sendMessageWithTyping(recipientId, text, options = {}) {
+  const { delay = 1000, quickReplies } = options;
+  
+  try {
+    await sendTypingOn(recipientId);
+    await sleep(delay);
+
+    const messageData = {
+      recipient: { id: recipientId },
+      message: { text, ...(quickReplies && { quick_replies: quickReplies }) }
+    };
+
+    await axios.post(
+      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
+      messageData
+    );
+  } catch (error) {
+    console.error('Message failed:', error.response?.data || error.message);
+  }
+}
+
+// ===== AI Functions =====
+async function getAIResponse(userId, message) {
   try {
     const completion = await openai.chat.completions.create({
       model: "qwen/qwen3-235b-a22b:free",
       messages: [
         { 
           role: 'system', 
-          content: 'You are a helpful assistant. Keep responses concise and friendly.' 
+          content: 'Respond concisely in 1-2 sentences. If asked the same question twice, provide alternative explanations.' 
         },
         { role: 'user', content: message },
       ],
       temperature: 0.7,
+      max_tokens: 150
     });
 
-    if (!completion.choices?.[0]?.message?.content) {
-      throw new Error("Empty response from AI");
-    }
-
-    return completion.choices[0].message.content;
+    return completion.choices[0]?.message?.content || "Let me think differently about that...";
   } catch (error) {
-    console.error('AI Response Error:', {
-      userId,
-      error: error.message,
-      responseData: error.response?.data,
-    });
-    return "I'm having trouble connecting to my AI brain. Please try again in a moment!";
+    console.error('AI error:', error.message);
+    return "I'm having trouble thinking right now. Could you ask again?";
   }
 }
 
-// Get AI image analysis
-async function getQwenImageResponse(userId, imageUrl) {
+async function getImageAnalysis(userId, imageUrl) {
   try {
     const completion = await openai.chat.completions.create({
       model: "qwen/qwen3-235b-a22b:free",
@@ -156,125 +219,38 @@ async function getQwenImageResponse(userId, imageUrl) {
       ],
     });
 
-    return completion.choices[0].message.content || "I can see the image but can't describe it right now.";
+    return completion.choices[0]?.message?.content || "I can see the image but can't describe it right now.";
   } catch (error) {
-    console.error('AI Image Analysis Error:', error.message);
+    console.error('Image analysis error:', error.message);
     return "I couldn't analyze that image. Please try another one!";
   }
 }
 
-// Send typing indicator
-async function sendTypingIndicator(recipientId) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
-      {
-        recipient: { id: recipientId },
-        sender_action: "typing_on"
-      }
-    );
-
-    // Random typing delay (1-2 seconds)
-    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
-
-    await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
-      {
-        recipient: { id: recipientId },
-        sender_action: "typing_off"
-      }
-    );
-  } catch (error) {
-    console.error('Typing Indicator Error:', error.response?.data || error.message);
-  }
+// ===== Utilities =====
+function isSimilarToLastMessage(user, currentMessage) {
+  if (!user.lastMessage || user.messageCount <= 1) return false;
+  return calculateSimilarity(user.lastMessage, currentMessage) > 0.7;
 }
 
-// Send message with options
-async function sendMessage(recipientId, text, options = {}) {
-  const { typing = false, quickReplies = null, buttons = null } = options;
-
-  try {
-    if (typing) await sendTypingIndicator(recipientId);
-
-    let messageData = {
-      recipient: { id: recipientId },
-      message: { text },
-    };
-
-    if (quickReplies) {
-      messageData.message.quick_replies = quickReplies;
-    }
-
-    if (buttons) {
-      messageData = {
-        recipient: { id: recipientId },
-        message: {
-          attachment: {
-            type: "template",
-            payload: {
-              template_type: "button",
-              text: text,
-              buttons: buttons
-            }
-          }
-        }
-      };
-    }
-
-    const response = await axios.post(
-      `https://graph.facebook.com/v20.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
-      messageData
-    );
-
-    console.log('Message sent successfully:', response.data);
-
-  } catch (error) {
-    console.error('Message Sending Error:', {
-      error: error.message,
-      response: error.response?.data,
-      recipientId
-    });
-  }
+function calculateSimilarity(str1, str2) {
+  const words1 = new Set(str1.split(/\s+/));
+  const words2 = new Set(str2.split(/\s+/));
+  const intersection = new Set([...words1].filter(w => words2.has(w)));
+  return intersection.size / Math.max(words1.size, words2.size);
 }
 
-// Quick Replies
 function getQuickReplies() {
   return [
-    {
-      content_type: "text",
-      title: "Ask a Question",
-      payload: "ask_question"
-    },
-    {
-      content_type: "text",
-      title: "Get Help",
-      payload: "get_help"
-    },
-    {
-      content_type: "text",
-      title: "About Me",
-      payload: "about_me"
-    }
+    { content_type: "text", title: "Ask question", payload: "ask_question" },
+    { content_type: "text", title: "Get help", payload: "get_help" }
   ];
 }
 
-// Buttons
-function getButtons() {
+function getConfirmationReplies() {
   return [
-    {
-      type: "web_url",
-      url: process.env.SITE_URL || "https://hm-validator.vercel.app",
-      title: "Visit My Site"
-    },
-    {
-      type: "postback",
-      title: "Talk to Human",
-      payload: "HUMAN_AGENT"
-    }
+    { content_type: "text", title: "Yes, thanks!", payload: "confirm_yes" },
+    { content_type: "text", title: "More details", payload: "request_more" }
   ];
 }
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
